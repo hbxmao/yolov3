@@ -258,18 +258,27 @@ class LoadStreams:  # multiple IP or RTSP cameras
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=416, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_images=False, single_cls=False):
-        path = str(Path(path))  # os-agnostic
-        assert os.path.isfile(path), 'File not found %s. See %s' % (path, help_url)
-        with open(path, 'r') as f:
-            self.img_files = [x.replace('/', os.sep) for x in f.read().splitlines()  # os-agnostic
-                              if os.path.splitext(x)[-1].lower() in img_formats]
+        try:
+            path = str(Path(path))  # os-agnostic
+            parent = str(Path(path).parent) + os.sep
+            if os.path.isfile(path):  # file
+                with open(path, 'r') as f:
+                    f = f.read().splitlines()
+                    f = [x.replace('./', parent) if x.startswith('./') else x for x in f]  # local to global path
+            elif os.path.isdir(path):  # folder
+                f = glob.iglob(path + os.sep + '*.*')
+            else:
+                raise Exception('%s does not exist' % path)
+            self.img_files = [x.replace('/', os.sep) for x in f if os.path.splitext(x)[-1].lower() in img_formats]
+        except:
+            raise Exception('Error loading data from %s. See %s' % (path, help_url))
 
         n = len(self.img_files)
         assert n > 0, 'No images found in %s. See %s' % (path, help_url)
         bi = np.floor(np.arange(n) / batch_size).astype(np.int)  # batch index
         nb = bi[-1] + 1  # number of batches
 
-        self.n = n
+        self.n = n  # number of images
         self.batch = bi  # batch index of image
         self.img_size = img_size
         self.augment = augment
@@ -285,7 +294,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         # Rectangular Training  https://github.com/ultralytics/yolov3/issues/232
         if self.rect:
             # Read image shapes (wh)
-            sp = path.replace('.txt', '.shapes')  # shapefile path
+            sp = path.replace('.txt', '') + '.shapes'  # shapefile path
             try:
                 with open(sp, 'r') as f:  # read existing shapefile
                     s = [x.split() for x in f.read().splitlines()]
@@ -297,11 +306,11 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             # Sort by aspect ratio
             s = np.array(s, dtype=np.float64)
             ar = s[:, 1] / s[:, 0]  # aspect ratio
-            i = ar.argsort()
-            self.img_files = [self.img_files[i] for i in i]
-            self.label_files = [self.label_files[i] for i in i]
-            self.shapes = s[i]  # wh
-            ar = ar[i]
+            irect = ar.argsort()
+            self.img_files = [self.img_files[i] for i in irect]
+            self.label_files = [self.label_files[i] for i in irect]
+            self.shapes = s[irect]  # wh
+            ar = ar[irect]
 
             # Set training image shapes
             shapes = [[1, 1]] * nb
@@ -322,16 +331,19 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         nm, nf, ne, ns, nd = 0, 0, 0, 0, 0  # number missing, found, empty, datasubset, duplicate
         np_labels_path = str(Path(self.label_files[0]).parent) + '.npy'  # saved labels in *.npy file
         if os.path.isfile(np_labels_path):
-            print('Loading labels from %s' % np_labels_path)
-            x = list(np.load(np_labels_path, allow_pickle=True))
+            s = np_labels_path  # print string
+            x = np.load(np_labels_path, allow_pickle=True)
             if len(x) == n:
                 self.labels = x
                 labels_loaded = True
+        else:
+            s = path.replace('images', 'labels')
 
-        pbar = tqdm(self.label_files, desc='Caching labels')
+        pbar = tqdm(self.label_files)
         for i, file in enumerate(pbar):
             if labels_loaded:
                 l = self.labels[i]
+                # np.savetxt(file, l, '%g')  # save *.txt from *.npy file
             else:
                 try:
                     with open(file, 'r') as f:
@@ -385,10 +397,10 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 ne += 1  # print('empty labels for image %s' % self.img_files[i])  # file empty
                 # os.system("rm '%s' '%s'" % (self.img_files[i], self.label_files[i]))  # remove
 
-            pbar.desc = 'Caching labels (%g found, %g missing, %g empty, %g duplicate, for %g images)' % (
-                nf, nm, ne, nd, n)
-        assert nf > 0, 'No labels found in %s. See %s' % (os.path.dirname(file) + os.sep, help_url)
-        if not labels_loaded:
+            pbar.desc = 'Caching labels %s (%g found, %g missing, %g empty, %g duplicate, for %g images)' % (
+                s, nf, nm, ne, nd, n)
+        assert nf > 0 or n == 20288, 'No labels found in %s. See %s' % (os.path.dirname(file) + os.sep, help_url)
+        if not labels_loaded and n > 1000:
             print('Saving labels to %s for faster future loading' % np_labels_path)
             np.save(np_labels_path, self.labels)  # save for next time
 
